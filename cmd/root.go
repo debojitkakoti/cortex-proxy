@@ -20,6 +20,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
+
+	"github.com/dgrijalva/jwt-go"
 
 	"net/http/httputil"
 
@@ -30,7 +33,9 @@ import (
 
 var cfgFile string
 var localAddress string
-var remoteAddress string
+var writeDistributorAddress string
+var readDistributorAddress string
+var jwtSecret string
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
@@ -47,7 +52,9 @@ to quickly create a Cobra application.`,
 	Run: func(cmd *cobra.Command, args []string) {
 
 		http.HandleFunc("/api/prom/push", performRedirectWithInject)
-		log.Printf("Listening on", localAddress)
+		http.HandleFunc("/api", frontEndProxy)
+
+		log.Printf("Listening on %s", localAddress)
 		log.Fatal(http.ListenAndServe(localAddress, nil))
 	},
 }
@@ -69,8 +76,12 @@ func init() {
 	// will be global for your application.
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.cortex-proxy.yaml)")
 	rootCmd.Flags().StringVarP(&localAddress, "lAddress", "l", "localhost:8080", "local server:port")
-	rootCmd.Flags().StringVarP(&remoteAddress, "rAddress", "r", "http://localhost:9009/api/prom/push", "Remote address to proxy http://cortex-server:port/api/prom/push")
+	rootCmd.Flags().StringVarP(&writeDistributorAddress, "wAddress", "w", "http://localhost:9009/api/prom/push", "Remote address to proxy http://cortex-server:port/api/prom/push")
+	rootCmd.Flags().StringVarP(&readDistributorAddress, "rAddress", "r", "http://localhost:9009/api/prom", "Remote cortex read address http://cortex-server:port/api/prom")
+	rootCmd.Flags().StringVarP(&jwtSecret, "jwtsecret", "j", "", "JWT secret for the token")
+	rootCmd.MarkFlagRequired("jwtsecret")
 	rootCmd.MarkFlagRequired("lAddress")
+	rootCmd.MarkFlagRequired("wAddress")
 	rootCmd.MarkFlagRequired("rAddress")
 	// Cobra also supports local flags, which will only run
 	// when this action is called directly.
@@ -105,18 +116,70 @@ func initConfig() {
 }
 
 func performRedirectWithInject(w http.ResponseWriter, r *http.Request) {
-
-	proxy := &httputil.ReverseProxy{Director: director}
+	token := r.Header.Get("Authorization")
+	token = strings.Split(token, "Bearer ")[1]
+	tenantID := parseToken(token)
+	log.Printf("performRedirectWithInject:Tenant id is %s", tenantID)
+	url, _ := url.Parse(writeDistributorAddress)
+	r.Header.Set("X-Scope-OrgID", tenantID)
+	proxy := &httputil.ReverseProxy{Director: director(url)}
 	proxy.ServeHTTP(w, r)
 
 }
 
-func director(r *http.Request) {
+func frontEndProxy(w http.ResponseWriter, r *http.Request) {
+	token := r.Header.Get("Authorization")
+	tenantID := parseToken(token)
+	log.Printf("frontEndProxy:Tenant id is %s", tenantID)
+	url, _ := url.Parse(readDistributorAddress)
+	r.Header.Set("X-Scope-OrgID", tenantID)
+	proxy := &httputil.ReverseProxy{Director: director(url)}
+	proxy.ServeHTTP(w, r)
 
-	origin, _ := url.Parse(remoteAddress)
-	r.Header.Add("X-Forwarded-Host", r.Host)
-	r.Header.Add("X-Origin-Host", origin.Host)
-	r.Header.Add("Authorization", "")
-	r.URL.Scheme = "http"
-	r.URL.Host = origin.Host
+}
+
+func director(targetURL *url.URL) func(req *http.Request) {
+
+	return func(req *http.Request) {
+		req.Header.Add("X-Forwarded-Host", targetURL.Host)
+		req.Header.Add("X-Origin-Host", targetURL.Host)
+
+		req.URL.Scheme = "http"
+		req.URL.Host = targetURL.Host
+		req.URL.Path = singleJoiningSlash(targetURL.Path, req.URL.Path)
+	}
+}
+
+func parseToken(tokenString string) string {
+	var tenantID string
+
+	hmacSampleSecret := []byte(jwtSecret)
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		// Don't forget to validate the alg is what you expect:
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("Unexpected signing method: %v", token.Header["alg"])
+		}
+
+		// hmacSampleSecret is a []byte containing your secret, e.g. []byte("my_secret_key")
+		return hmacSampleSecret, nil
+	})
+
+	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+		tenantID = fmt.Sprint(claims["tenant_id"])
+	} else {
+		log.Println(err)
+	}
+	return tenantID
+}
+
+func singleJoiningSlash(a, b string) string {
+	aslash := strings.HasSuffix(a, "/")
+	bslash := strings.HasPrefix(b, "/")
+	switch {
+	case aslash && bslash:
+		return a + b[1:]
+	case !aslash && !bslash:
+		return a + "/" + b
+	}
+	return a + b
 }
