@@ -158,7 +158,12 @@ func director(targetURL *url.URL) func(req *http.Request) {
 
 		req.URL.Scheme = "http"
 		req.URL.Host = targetURL.Host
-		req.URL.Path = singleJoiningSlash(targetURL.Path, req.URL.Path)
+		req.URL.Path = targetURL.Path
+		//req.URL.Path = singleJoiningSlash(targetURL.Path, req.URL.Path)
+
+		log.Println("director: Req URL Scheme ", req.URL.Scheme)
+		log.Println("director: Req URL Host ", req.URL.Host)
+		log.Println("director: Req URL Path", req.URL.Path)
 
 		if targetQuery == "" || req.URL.RawQuery == "" {
 			req.URL.RawQuery = targetQuery + req.URL.RawQuery
@@ -169,6 +174,7 @@ func director(targetURL *url.URL) func(req *http.Request) {
 			// explicitly disable User-Agent so it's not set to default value
 			req.Header.Set("User-Agent", "")
 		}
+		log.Println("director: Req URL Query ", req.URL.RawQuery)
 	}
 }
 
