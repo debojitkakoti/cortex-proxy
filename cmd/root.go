@@ -21,10 +21,12 @@ import (
 	"net/url"
 	"os"
 	"strings"
-
-	"github.com/dgrijalva/jwt-go"
+	"time"
 
 	"net/http/httputil"
+
+	"github.com/dgrijalva/jwt-go"
+	"github.com/gorilla/mux"
 
 	homedir "github.com/mitchellh/go-homedir"
 	"github.com/spf13/cobra"
@@ -51,11 +53,20 @@ to quickly create a Cobra application.`,
 	// has an action associated with it:
 	Run: func(cmd *cobra.Command, args []string) {
 
-		http.HandleFunc("/api/prom/push", performRedirectWithInject)
-		http.HandleFunc("/api", frontEndProxy)
+		router := mux.NewRouter()
 
-		log.Printf("Listening on %s", localAddress)
-		log.Fatal(http.ListenAndServe(localAddress, nil))
+		router.HandleFunc("/api/prom/push", performRedirectWithInject)
+		router.PathPrefix("/api/").HandlerFunc(frontEndProxy)
+
+		srv := &http.Server{
+			Handler: router,
+			Addr:    localAddress,
+			// Good practice: enforce timeouts for servers you create!
+			WriteTimeout: 15 * time.Second,
+			ReadTimeout:  15 * time.Second,
+		}
+
+		log.Fatal(srv.ListenAndServe())
 	},
 }
 
@@ -139,6 +150,7 @@ func frontEndProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 func director(targetURL *url.URL) func(req *http.Request) {
+	targetQuery := targetURL.RawQuery
 
 	return func(req *http.Request) {
 		req.Header.Add("X-Forwarded-Host", targetURL.Host)
@@ -147,6 +159,16 @@ func director(targetURL *url.URL) func(req *http.Request) {
 		req.URL.Scheme = "http"
 		req.URL.Host = targetURL.Host
 		req.URL.Path = singleJoiningSlash(targetURL.Path, req.URL.Path)
+
+		if targetQuery == "" || req.URL.RawQuery == "" {
+			req.URL.RawQuery = targetQuery + req.URL.RawQuery
+		} else {
+			req.URL.RawQuery = targetQuery + "&" + req.URL.RawQuery
+		}
+		if _, ok := req.Header["User-Agent"]; !ok {
+			// explicitly disable User-Agent so it's not set to default value
+			req.Header.Set("User-Agent", "")
+		}
 	}
 }
 
